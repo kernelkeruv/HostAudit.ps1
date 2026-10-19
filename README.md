@@ -1,125 +1,64 @@
-# Host-Audit.ps1 — GitHub README
+# HostAudit.ps1 | Windows endpoint integrity triage
 
-## Overview
+PowerShell 7 script to inventory Windows host health, file-system minifilters, and kernel driver metadata. Source: [HostAudit.ps1](HostAudit.ps1). Created for defensive research and authorized assessment.
 
-**Host-Audit.ps1** is a PowerShell-based host integrity and kernel filter/driver audit for Windows systems. It collects a compact, read-only set of artifacts useful for triage, forensics, and system health checks.
+## What the script collects
 
-This repository-safe version does **not** contain or reveal any environment-specific mount points or private drive letters. Configure where results are written using the `HOSTAUDIT_ROOT` environment variable or the `-OutputRoot` parameter.
+| Artifact | Data |
+| --- | --- |
+| `Summary_*.txt` | DISM CheckHealth result, Defender and Sysmon status, artifact paths |
+| `DISM_CheckHealth_*.txt` | DISM component-store health |
+| `fltmc_*.txt`, `MiniFilters_*.csv` | Minifilter enumeration and parsed name, instances, altitude, frame |
+| `RunningKernelDrivers_*.csv` | Driver state, file path, SHA-256 hash, Authenticode status and publisher |
+| `NonMicrosoftDrivers_*.csv` | Driver review subset based on non-Microsoft publisher or invalid signature |
+| `Transcript_*.log` | Best-effort PowerShell execution transcript |
+| `SFC_*.txt` | Optional SFC output; produced when `-Quick` is absent |
 
----
+## Important impact and evidence limits
 
-## ✳️ What it collects
+**This utility is not strictly read-only in its default mode.** `sfc /scannow` can repair Windows protected files and change system state. For collection that avoids SFC repairs, **use `-Quick`**. DISM `/CheckHealth` is a health check, not `/RestoreHealth`.
 
-* Windows image health (`DISM /CheckHealth`) and optional `SFC /scannow` (skippable with `-Quick`)
-* Windows Defender status snapshot (if platform cmdlets available)
-* Mini-filter driver list (`fltmc`) in raw and parsed CSV form
-* Running kernel drivers with Authenticode signature status and SHA256 hashes
-* Non-Microsoft or unsigned driver subset for focused review
-* Sysmon service presence/state and version (best-effort)
-* Human-readable summary and a transcript of the run
+Other caveats: PowerShell auto-elevates when needed; every run writes report files. Driver hashes are SHA-256 fingerprints, not proof that a driver is benign. Missing or invalid signatures alone are not sufficient evidence of compromise. CSV/text exports are derivatives and do not independently establish evidence integrity or chain of custody.
 
-All actions are read-only — the script does not modify system state.
+For forensic work, use a disposable or approved host, preserve originals separately, record local and UTC times, and hash the exported reports after a run. Output can contain sensitive computer names and software metadata; do not commit production results to GitHub.
 
----
+## Requirements
 
-## ⚙️ Requirements
+- Windows 10/11 or Windows Server with PowerShell 7+ (`pwsh`)
+- Administrative privileges for filter/driver inspection
+- A writable report destination
 
-* PowerShell 7.0+ (`pwsh`)
-* Administrator privileges (the script auto-elevates when necessary)
-* Writable output root (see **Output** below)
+## Safe demonstration (Windows / PowerShell)
 
----
-
-## 📁 Output and where it goes
-
-Set the destination for results in order of precedence:
-
-1. `-OutputRoot` parameter when invoking the script
-2. `HOSTAUDIT_ROOT` environment variable
-3. Fallback: `$HOME\Reports\HostAudit`
-
-A typical run creates a timestamped folder:
-
-```
-<OUTPUT_ROOT>/<HOST>_<YYYY-MM-DD_HH-mm-ss>/
-```
-
-Example artifacts:
-
-* `Summary_<HOST>_<STAMP>.txt` — human summary and pointers
-* `Transcript_<HOST>_<STAMP>.log` — console transcript (best-effort)
-* `DISM_CheckHealth_<HOST>_<STAMP>.txt`
-* `SFC_<HOST>_<STAMP>.txt` (omitted with `-Quick`)
-* `fltmc_<HOST>_<STAMP>.txt`
-* `MiniFilters_<HOST>_<STAMP>.csv`
-* `RunningKernelDrivers_<HOST>_<STAMP>.csv`
-* `NonMicrosoftDrivers_<HOST>_<STAMP>.csv`
-
-Files are UTF-8 CSV/TXT so they can be imported into Excel, SIEMs, or text tools.
-
----
-
-## 🔎 Parameters
-
-| Parameter            | Description                                      |
-| -------------------- | ------------------------------------------------ |
-| `-Quick`             | Skip `sfc /scannow` to finish faster.            |
-| `-NoExplorer`        | Do not open the results folder when finished.    |
-| `-OutputRoot <path>` | Explicit output root folder (overrides env var). |
-
----
-
-## 🚀 Usage examples
+Select a **writable working directory** and specify it explicitly; do not rely on the script's fallback location. The example avoids SFC repairs.
 
 ```powershell
-# Full run (auto-elevates, runs SFC)
-pwsh -File .\Host-Audit.ps1
-
-# Faster run (skip SFC)
-pwsh -File .\Host-Audit.ps1 -Quick
-
-# Custom output root and no Explorer popup
-pwsh -File .\Host-Audit.ps1 -OutputRoot 'D:\Forensics\HostAudits' -NoExplorer
+$WorkDir = 'C:\Forensics\LabOutput'
+$Script = (Resolve-Path '.\HostAudit.ps1').Path
+# Review script before granting elevation.
+pwsh -NoProfile -File $Script -Quick -NoExplorer -OutputRoot $WorkDir
+# Inspect only the newest result produced by this invocation.
+$Latest = Get-ChildItem -LiteralPath $WorkDir -Directory |
+  Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+Get-ChildItem -LiteralPath $Latest.FullName -File | Select-Object Name,Length
+Get-ChildItem -LiteralPath $Latest.FullName -File |
+  Get-FileHash -Algorithm SHA256 |
+  Format-Table Path,Hash -AutoSize |
+  Out-String -Width 240 | Set-Clipboard
 ```
 
----
+**Expected artifacts (schema, not an actual machine result):** `Summary_*.txt`, `DISM_CheckHealth_*.txt`, `fltmc_*.txt`, `MiniFilters_*.csv`, `RunningKernelDrivers_*.csv`, `NonMicrosoftDrivers_*.csv`. The last command places file hashes on the Windows clipboard for verification.
 
-## 🧾 Interpreting results
+## Review and verification
 
-* **DISM:** If `CheckHealth` reports no corruption, the component store is intact. If it reports repairable corruption, consider running `DISM /RestoreHealth` in a controlled maintenance window.
-* **SFC:** `Windows Resource Protection did not find any integrity violations` means protected files are intact.
-* **NonMicrosoftDrivers CSV:** Review entries for unexpected publishers or unsigned drivers; many third-party drivers (NVIDIA, Intel, vendor utilities) are normal, but unknown/unexpected publishers should be validated.
-* **MiniFilters CSV:** Expected filters include `WdFilter`, `bindflt`, `wcifs`, `SysmonDrv` (if installed). Unexpected filter names or altitudes should be investigated.
+1. Read `Summary_*.txt` for DISM/Defender/Sysmon status and any collection errors.
+2. Open `RunningKernelDrivers_*.csv`; compare `SignatureStatus`, `Publisher`, `SHA256` and `Path` to trusted software inventory.
+3. Inspect `MiniFilters_*.csv` and validate unfamiliar filters against known hardware/security software.
+4. Record the command and tool versions (`$PSVersionTable.PSVersion`, `Get-Command fltmc`).
+5. Re-run only on an authorized lab system; compare hashes and differences rather than treating all changes as threats.
 
-Start with `Summary_*.txt` and then open the CSVs referenced in that file for detailed review.
+## Validation status
 
----
+This repository documents a source script, not a certified forensic product. No CI test here demonstrates successful collection on a Windows host. A future Windows integration test should verify CSV headers, `-Quick` behavior, nonzero failure handling and traceability of the execution transcript. Do not advertise the script as forensically validated until such tests exist.
 
-## 🛠️ Troubleshooting & notes
-
-* **Self-elevation spawns a new elevated window and closes the original:** This is intentional to perform admin-only checks. Results are written to the output folder by the elevated run.
-* **`fltmc` access denied:** Elevation required — rerun allowing the script to elevate.
-* **Missing output drive:** If you depend on a removable or network volume, set `HOSTAUDIT_ROOT` to a stable local path or ensure the volume is mounted before running.
-
----
-
-## 🧰 Integration tips
-
-Add short aliases to your PowerShell profile for convenience:
-
-```powershell
-function Host-Audit   { pwsh -File "$HOME\Host-Audit.ps1" }
-function Quick-Audit  { pwsh -File "$HOME\Host-Audit.ps1" -Quick }
-function Silent-Audit { pwsh -File "$HOME\Host-Audit.ps1" -NoExplorer }
-Set-Alias hostaudit Host-Audit
-```
-
----
-
-## ⚖️ License
-
-MIT License — feel free to fork and adapt. Do not include sensitive environment paths or secrets in public forks.
-
----
-
-If you'd like, I can also produce a compact QuickRef cheat-sheet version suitable for pasting in a repo `docs/` folder.
+MIT licensed.
